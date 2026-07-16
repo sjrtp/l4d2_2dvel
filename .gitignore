@@ -1,0 +1,65 @@
+# === Left 4 Dead 2 SDK ===
+# Keep the hl2sdk folder itself, but ignore everything cloned into it. Recommended to git clone for newest version.
+hl2sdk/*
+!hl2sdk/.gitkeep
+
+# === User-specific files ===
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# === Build results ===
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# === Visual Studio cache/options ===
+.vs/
+ipch/
+
+# === Files built by Visual Studio ===
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*.log
+*.vspscc
+*.vssscc
+*.pidb
+*.svclog
+*.scc
+
+# === Visual C++ cache files ===
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# === OS junk files ===
+Thumbs.db
+.DS_Store

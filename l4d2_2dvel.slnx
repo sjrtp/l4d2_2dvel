@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="l4d2_2dvel.vcxproj" Id="e73833a7-2388-4bf0-ba7c-b358a6fe1e53" />
+</Solution>
