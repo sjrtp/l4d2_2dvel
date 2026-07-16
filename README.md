@@ -129,3 +129,7 @@ Without this, the game will refuse to load the plugin.
 - All required headers (`eiface.h`, `cdll_int.h`, `imaterialsystem.h`, etc.) come from `hl2sdk`
 
 Nothing else is required beyond Visual Studio and the SDK.
+
+
+
+##[Download v1.0 Release](https://github.com/sjrtp/l4d2_2dvel/releases/tag/v1.0)
