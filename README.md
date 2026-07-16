@@ -1,14 +1,15 @@
 # L4D2 2D Velocity Speed Proxy
 
-A small plugin (DLL) for **Left 4 Dead 2** that shows the player's **2D speed** (ground speed, ignoring vertical movement) through a material proxy called `PlayerSpeed`. Useful for HUDs or speedometers that want a clean bhop-style speed number instead of raw 3D velocity.
+A small plugin (DLL) for Left 4 Dead 2, built for local/listen server use in TAS/TSA or even in RTA speedrunning. It shows the player's 2D speed (ground speed, ignoring vertical movement) through a material proxy called PlayerSpeed, giving a clean bhop-style speed number instead of raw 3D velocity. Not intended for multiplayer or dedicated servers.
 
 ## What it does
 
 - Reads the local player's velocity directly from game memory.
 - Shows only horizontal (2D) speed, which is what bhop players care about.
-- Switches to full 3D speed automatically when the player is on a ladder.
+- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles (e.g. -78 degree throwable/launcher boosts) where the jump starts near-zero horizontal velocity.
 - Smooths out small jitters so the number on screen does not flicker.
 - Plugs into the game's material system so any material using `$speed` can display this value.
+- Works during demo playback. (Even for demos recorded on official servers without the plugin loaded.)
 
 The plugin loads as a **server plugin**. Once loaded, it replaces the game's material proxy factory with its own. Whenever the game asks for a proxy named `PlayerSpeed`, the plugin hands back its own code instead, which calculates and updates the speed value every frame.
 
