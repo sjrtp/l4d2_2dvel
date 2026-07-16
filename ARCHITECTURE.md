@@ -8,17 +8,17 @@ The plugin is a DLL that the game loads as a **server plugin**. Once loaded, it 
 
 ```mermaid
 flowchart TD
-    A[Game starts and loads the plugin DLL] --> B[Plugin Load function runs]
-    B --> C[Plugin finds game interfaces:<br/>engine, client.dll, material system]
-    C --> D[Plugin finds where player velocity<br/>is stored in memory]
-    D --> E[Plugin replaces the game's<br/>material proxy factory with its own]
-    E --> F[Game asks for a proxy named<br/>&quot;PlayerSpeed&quot;]
-    F --> G[Plugin's proxy runs every frame]
+    A[Game loads<br/>the plugin DLL] --> B[Plugin's Load<br/>function runs]
+    B --> C[Plugin gets game<br/>interfaces: engine,<br/>client.dll, material system]
+    C --> D[Plugin finds player<br/>velocity in memory]
+    D --> E[Plugin replaces the<br/>material proxy factory]
+    E --> F[Game requests a proxy<br/>named &quot;PlayerSpeed&quot;]
+    F --> G[Plugin's proxy runs<br/>every frame]
     G --> H[Reads player velocity]
-    H --> I[Calculates 2D or 3D speed]
+    H --> I[Calculates 2D<br/>or 3D speed]
     I --> J[Smooths the number]
-    J --> K[Sends value to $speed material variable]
-    K --> L[HUD / material shows the speed]
+    J --> K[Writes value into<br/>$speed variable]
+    K --> L[HUD / material<br/>shows the speed]
 ```
 
 ## Step by step
