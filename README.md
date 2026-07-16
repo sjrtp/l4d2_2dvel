@@ -123,7 +123,7 @@ Left 4 Dead 2 blocks unsigned server plugins like this one while VAC (Valve Anti
 Without this, the game will refuse to load the plugin.
 
 # **WARNING**:
-Do not UNLOAD and LOAD/RELOAD the plugin while the game is running, as this will cause a crash. (Planning to fix that soon)
+Do not UNLOAD THEN LOAD/RELOAD the plugin while the game is running, as this will cause a crash. (Planning to fix that soon)
 
 ## Dependencies at a glance
 
