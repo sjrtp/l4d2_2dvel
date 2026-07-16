@@ -107,9 +107,6 @@ If the paths in the `.vcxproj` are still hardcoded to a personal `C:\Users\...` 
 
 If you would rather load it manually instead of using the `.vdf` manifest, you can skip step 2 and use the engine's `plugin_load addons/l4d2_2dvel` console command instead.
 
-# **WARNING**:
-Do not UNLOAD and LOAD/RELOAD the plugin while the game is running, as this will cause a crash. (Planning to fix that soon)
-
 ### 6. Enable the `-insecure` launch option
 
 Left 4 Dead 2 blocks unsigned server plugins like this one while VAC (Valve Anti-Cheat) is active, so you need to disable VAC for the session:
@@ -124,6 +121,9 @@ Left 4 Dead 2 blocks unsigned server plugins like this one while VAC (Valve Anti
 5. Close the properties window and launch the game.
 
 Without this, the game will refuse to load the plugin.
+
+# **WARNING**:
+Do not UNLOAD and LOAD/RELOAD the plugin while the game is running, as this will cause a crash. (Planning to fix that soon)
 
 ## Dependencies at a glance
 
