@@ -9,7 +9,7 @@ A small plugin (DLL) for Left 4 Dead 2, built for local/listen server use in TAS
   - By default (`mode "3d"`), this is the raw, unsmoothed speed number, matching `cl_showpos 1` exactly.
   - With `mode "2d"` set in a material's `.vmt` file, the number becomes horizontal-only (2D) speed with smoothing applied, so it does not flicker on tiny jitters — meant for a clean bhop-style readout.
   - A material can also set `resultVar` (which shader variable to write into) and `scale` (multiply the number by this) in the same block, so this plugin works with other people's existing speedometer/velometer add-ons without editing their files.
-- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles where the jump starts near-zero horizontal velocity — in both `mode "3d"` and `mode "2d"`.
+- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles where the jump starts near-zero horizontal velocity — in `mode "2d"`.
 - Works during demo playback. (Even for demos recorded on official servers without the plugin loaded.)
 
 The plugin loads as a **server plugin**. Once loaded, it replaces the game's material proxy factory with its own. Whenever the game asks for a proxy called `PlayerSpeed`, the plugin hands back its own code instead, which calculates and updates the speed value every frame. Any other proxy name is passed straight through to the game's original factory, so nothing else breaks.
@@ -156,7 +156,7 @@ Do not UNLOAD THEN LOAD/RELOAD the plugin while the game is running, as this wil
 
 Nothing else is required beyond Visual Studio and the SDK.
 
-<<<<<<< HEAD
+
 ## Known non-issue: exception message on `quit`
 
 If you have a debugger attached (e.g. Visual Studio) and type `quit` in the console, you may see an exception message pointing at `tier0.dll`. This is a normal side effect of Windows unloading DLLs in an unpredictable order while the whole game process is shutting down, not something wrong with this plugin's code — the process still exits normally right after (exit code 0), and the message does not appear at all without a debugger attached. It is safe to ignore. Disconnecting from a map (instead of fully quitting) does not trigger this at all.
@@ -164,4 +164,3 @@ If you have a debugger attached (e.g. Visual Studio) and type `quit` in the cons
 
 
 ➡[Download v1.0 Release](https://github.com/sjrtp/l4d2_2dvel/releases/tag/v1.0)
->>>>>>> 607cbeb09650fdfb87b00aaca16e7b42e62da8ff
