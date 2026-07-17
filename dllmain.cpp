@@ -45,6 +45,8 @@ static IVEngineClient* g_pEngine = nullptr;
 static IClientEntityList* g_pEntityList = nullptr;
 static IBaseClientDLL* g_pClientDLL = nullptr;
 static int g_iVelocityOffset = -1;
+static int g_iObserverModeOffset = -1;
+static int g_iObserverTargetOffset = -1;
 static int g_iResolveAttempts = 0;
 static const int MAX_RESOLVE_ATTEMPTS = 3;
 
@@ -73,7 +75,8 @@ static bool FindRecvPropOffset(RecvTable* pTable, const char* propName, int base
 	return false;
 }
 
-// Resolve m_vecVelocity offset at runtime by walking client RecvTable
+// Resolve m_vecVelocity, m_iObserverMode, and m_hObserverTarget offsets at runtime
+// by walking client RecvTable. Observer offsets are best-effort (not fatal if missing).
 static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
 {
 	if (!pClientDLL)
@@ -95,19 +98,50 @@ static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
 		if (pClass->m_pNetworkName && strcmp(pClass->m_pNetworkName, "CTerrorPlayer") == 0)
 		{
 			int offset = 0;
+			bool bGotVelocity = false;
+
 			if (FindRecvPropOffset(pClass->m_pRecvTable, "m_vecVelocity", 0, offset))
 			{
-				if (offset < 0 || offset > 65536)
+				if (offset >= 0 && offset <= 65536)
+				{
+					g_iVelocityOffset = offset;
+					LogLine("[2DSpeedProxy] Resolved m_vecVelocity offset = %d (client-side RecvTable)", offset);
+					bGotVelocity = true;
+				}
+				else
 				{
 					LogLine("[2DSpeedProxy] Resolved m_vecVelocity to an implausible offset = %d -- rejecting it", offset);
-					return false;
 				}
-				g_iVelocityOffset = offset;
-				LogLine("[2DSpeedProxy] Resolved m_vecVelocity offset = %d (client-side RecvTable)", offset);
-				return true;
 			}
-			LogLine("[2DSpeedProxy] Found CTerrorPlayer but couldn't find m_vecVelocity in its RecvTable");
-			return false;
+			else
+			{
+				LogLine("[2DSpeedProxy] Found CTerrorPlayer but couldn't find m_vecVelocity in its RecvTable");
+			}
+
+			// Observer mode/target - needed to detect noclip while spectating another player
+			int obsOffset = 0;
+			if (FindRecvPropOffset(pClass->m_pRecvTable, "m_iObserverMode", 0, obsOffset))
+			{
+				g_iObserverModeOffset = obsOffset;
+				LogLine("[2DSpeedProxy] Resolved m_iObserverMode offset = %d", obsOffset);
+			}
+			else
+			{
+				LogLine("[2DSpeedProxy] Could not find m_iObserverMode in RecvTable");
+			}
+
+			int targetOffset = 0;
+			if (FindRecvPropOffset(pClass->m_pRecvTable, "m_hObserverTarget", 0, targetOffset))
+			{
+				g_iObserverTargetOffset = targetOffset;
+				LogLine("[2DSpeedProxy] Resolved m_hObserverTarget offset = %d", targetOffset);
+			}
+			else
+			{
+				LogLine("[2DSpeedProxy] Could not find m_hObserverTarget in RecvTable");
+			}
+
+			return bGotVelocity;
 		}
 		pClass = pClass->m_pNext;
 	}
@@ -140,7 +174,64 @@ static bool IsOnLadder(const Vector3D* pVel)
 	return (flVertical > 350.0f && flHorizontal < 50.0f) || (flVertical > 10.0f && flHorizontal < 25.0f);
 }
 
-static float ComputeSmoothedLocalPlayerSpeed2D()
+// If spectating (observer mode != 0) with a valid target, returns the target entity.
+// Otherwise (playing normally, or free-roam with no target) returns pLocalEntity itself.
+// This makes noclip/velocity reads follow whoever you're actually spectating.
+static C_BaseEntity* ResolveEffectiveEntity(C_BaseEntity* pLocalEntity)
+{
+	if (!pLocalEntity || g_iObserverModeOffset < 0 || g_iObserverTargetOffset < 0 || !g_pEntityList)
+		return pLocalEntity;
+
+	const char* pBase = reinterpret_cast<const char*>(pLocalEntity);
+	int iObsMode = *reinterpret_cast<const int*>(pBase + g_iObserverModeOffset);
+
+	// OBS_MODE_NONE = 0 -> not spectating, use self
+	if (iObsMode == 0)
+		return pLocalEntity;
+
+	int iHandleRaw = *reinterpret_cast<const int*>(pBase + g_iObserverTargetOffset);
+	if (iHandleRaw == 0 || iHandleRaw == 0xFFFFFFFF)
+		return pLocalEntity; // no valid target (e.g. free-roam), fall back to self
+
+	CBaseHandle hTarget(static_cast<unsigned long>(iHandleRaw));
+	IClientEntity* pTargetEnt = g_pEntityList->GetClientEntityFromHandle(hTarget);
+	if (!pTargetEnt)
+		return pLocalEntity;
+
+	C_BaseEntity* pTargetBase = pTargetEnt->GetBaseEntity();
+	return pTargetBase ? pTargetBase : pLocalEntity;
+}
+
+// MoveType 0x144 confirmed: 2 = MOVETYPE_WALK, 8 = MOVETYPE_NOCLIP. Logs only on change now, no more per-frame spam.
+static bool IsInNoclip(C_BaseEntity* pEntity)
+{
+	if (!pEntity) return false;
+
+	try {
+		int iOffset = 0x144; // confirmed via cheat engine address scanning: 2 = MOVETYPE_WALK, 8 = MOVETYPE_NOCLIP
+		const char* pBase = reinterpret_cast<const char*>(pEntity);
+		int* pMoveType = reinterpret_cast<int*>((void*)(pBase + iOffset));
+
+		// Only log when the value actually changes
+		static int iLastMoveType = -1;
+		if (*pMoveType != iLastMoveType)
+		{
+			iLastMoveType = *pMoveType;
+			if (*pMoveType == 2)
+				LogLine("[2DSpeedProxy] MOVETYPE = WALK");
+			else if (*pMoveType == 8)
+				LogLine("[2DSpeedProxy] MOVETYPE = NOCLIP");
+		}
+
+		// MOVETYPE_NOCLIP = 8
+		return (*pMoveType == 8);
+	}
+	catch (...) {
+		return false;
+	}
+}
+
+static float ComputeSmoothedLocalPlayerSpeed2D(bool bForce3D = false)
 {
 	const int FILTER_SAMPLES = 1;
 	static float flHistory[FILTER_SAMPLES] = { 0.0f };
@@ -161,25 +252,39 @@ static float ComputeSmoothedLocalPlayerSpeed2D()
 				{
 					// Get the actual C_BaseEntity, not the IClientEntity wrapper
 					C_BaseEntity* pEntity = pClientEnt->GetBaseEntity();
+
+					// If spectating/free-roaming, follow the target being observed instead of self
+					pEntity = ResolveEffectiveEntity(pEntity);
+
 					if (pEntity)
 					{
 						// Cast to char* for pointer arithmetic, then cast to Vector3D
 						const char* pRaw = reinterpret_cast<const char*>(pEntity);
 						const Vector3D* pVel = reinterpret_cast<const Vector3D*>(pRaw + g_iVelocityOffset);
 
-						// Always use 2D for bhop, 3D only on ladders
+						// If in noclip, return raw 3D velocity, bypass ladder/2D logic entirely
+						if (IsInNoclip(pEntity))
+						{
+							return pVel->Length3D();
+						}
+
+						// Always use 2D for bhop, 3D only on ladders - unless the
+						// calling material explicitly opted into "mode 3d", in which
+						// case always report full 3D magnitude (still smoothed the
+						// same way $speed/$2dvel are).
 						bool bOnLadder = IsOnLadder(pVel);
-						if (!bOnLadder)
-							flRaw = pVel->Length2D();  // Only horizontal velocity for bhop (2D mode)
+						if (bForce3D || bOnLadder)
+							flRaw = pVel->Length3D();  // Full 3D velocity (forced, or on ladder)
 						else
-							flRaw = pVel->Length3D();  // Full 3D velocity on ladder
+							flRaw = pVel->Length2D();  // Only horizontal velocity for bhop (2D mode)
 
 						bWasOnLadder = bOnLadder;
 					}
 				}
 			}
 		}
-	} catch (...) {
+	}
+	catch (...) {
 		// Silently ignore any errors accessing entity data during demos
 		flRaw = 0.0f;
 	}
@@ -200,67 +305,115 @@ class CSpeedProxy : public IMaterialProxy
 {
 private:
 	IMaterialVar* m_pSpeedVar = nullptr;
+	float m_flScale = 1.0f;
+	bool m_bForce3D = false;
 	static float flLastDisplayed;
-	static int iFramesAtLow;
-	static const int FRAMES_UNTIL_DECREASE = 2;  // Only show decrease if it lasts 2+ frames
 
 public:
 	bool Init(IMaterial* pMaterial, KeyValues* pKeyValues) override
 	{
-		m_pSpeedVar = pMaterial->FindVar("$speed", nullptr);
+		// Honor resultVar from the VMT's Proxies{} block (engine convention),
+		// defaulting to $speed only if the material doesn't specify one.
+		// This matters because "PlayerSpeed" may already be used by other
+		// materials (e.g. vgui/hud/arrow) with a DIFFERENT resultVar - hardcoding
+		// "$speed" here would hijack those and break them (FindVar fails ->
+		// "No such variable" spam -> proxy silently stuck doing nothing).
+		const char* pszResultVar = pKeyValues ? pKeyValues->GetString("resultVar", "$speed") : "$speed";
+		bool bFound = false;
+		m_pSpeedVar = pMaterial->FindVar(pszResultVar, &bFound);
+		if (!bFound)
+		{
+			LogLine("[2DSpeedProxy] PlayerSpeed: material has no var \"%s\" - skipping (not our material)", pszResultVar);
+			m_pSpeedVar = nullptr;
+		}
+
+		// Honor "scale" from the Proxies{} block, same as the real engine proxy.
+		// Defaults to 1.0 (no-op) so our own VMT (scale 1) still gets raw,
+		// cl_showpos-exact values - but third-party materials like nOaimbot's
+		// velometer, which ship their own scale key expecting it to actually be
+		// applied, get properly mapped instead of being fed raw unscaled speed
+		// (which is what was pegging their needle to max).
+		m_flScale = pKeyValues ? pKeyValues->GetFloat("scale", 1.0f) : 1.0f;
+
+		// Honor "mode" from the Proxies{} block. Default is "3d": raw, unsmoothed,
+		// matches cl_showpos exactly (confirmed empirically against nOaimbot's
+		// UNEDITED original digits.vmt, which has no "mode" key at all and is
+		// expected to match cl_showpos with zero edits). "2d" is horizontal-only
+		// speed WITH smoothing/hysteresis applied (see OnBind) - e.g. for a
+		// flicker-free bhop-style gauge. Noclip and ladder/steep-launch detection
+		// still force full 3D regardless of this setting either way.
+		const char* pszMode = pKeyValues ? pKeyValues->GetString("mode", "3d") : "3d";
+		m_bForce3D = (_stricmp(pszMode, "2d") != 0);
+
 		return m_pSpeedVar != nullptr;
 	}
 
 	void OnBind(void* pRenderable) override
 	{
 		if (!m_pSpeedVar) return;
+
+		if (m_bForce3D)
+		{
+			///////////////////////////////////////////////////////////////////////
+			// mode "3d" (default): raw, no smoothing/rounding/hysteresis - just  //
+			// * scale. With scale 1 this mirrors cl_showpos exactly, in every    //
+			// state (walking, bhopping, ladders, noclip).                       //
+			///////////////////////////////////////////////////////////////////////
+			m_pSpeedVar->SetFloatValue(ComputeSmoothedLocalPlayerSpeed2D(true) * m_flScale);
+			return;
+		}
+
+		///////////////////////////////////////////////////////////////////////////
+		// mode "2d": horizontal-only speed, WITH smoothing/hysteresis applied -  //
+		// this used to be the separate $2dvel/PlayerSpeed2D proxy, now merged    //
+		// in here so "mode" alone decides raw-vs-clean instead of needing a      //
+		// second proxy name. Still forces full 3D during noclip (bypassing      //
+		// hysteresis) since noclip speed changes are intentional/instant, not    //
+		// jitter to smooth out.                                                  //
+		///////////////////////////////////////////////////////////////////////////
+		bool bNoclip = false;
+		if (g_pEngine && g_pEntityList)
+		{
+			int iLocalPlayer = g_pEngine->GetLocalPlayer();
+			if (iLocalPlayer > 0)
+			{
+				IClientEntity* pClientEnt = g_pEntityList->GetClientEntity(iLocalPlayer);
+				if (pClientEnt)
+				{
+					C_BaseEntity* pEntity = pClientEnt->GetBaseEntity();
+					pEntity = ResolveEffectiveEntity(pEntity);
+					bNoclip = pEntity && IsInNoclip(pEntity);
+				}
+			}
+		}
+
+		if (bNoclip)
+		{
+			m_pSpeedVar->SetFloatValue(ComputeSmoothedLocalPlayerSpeed2D() * m_flScale);
+			return;
+		}
+
 		float flSmoothed = ComputeSmoothedLocalPlayerSpeed2D();
 		float flRounded = std::round(flSmoothed);
 
-		///////////////////////////////////////////////////////////////////////////////
-		//                 Jump-apex dip suppression (display smoothing)             //
-		// Filters out the fake 2-3 unit speed drop that happens at the peak of a    //
-		// jump, so the displayed number doesn't flicker down when the player        //
-		// hasn't actually slowed down.                                              //
-		///////////////////////////////////////////////////////////////////////////////
-
-		// Force very low velocities to 0 (idle/animation detection)
-		// When velocity is sitting at 1-2 units, player is effectively stationary
 		if (flRounded <= 2.0f)
 		{
 			flLastDisplayed = 0.0f;
-			iFramesAtLow = 0;
 		}
-		// Hysteresis: only allow decreases if they persist AND are significant (5+ units)
 		else if (flRounded > flLastDisplayed)
 		{
-			// Velocity increasing - update immediately
 			flLastDisplayed = flRounded;
-			iFramesAtLow = 0;
 		}
 		else if (flRounded < flLastDisplayed)
 		{
-			// Velocity decreasing - only update if decrease is significant (>= 3 units)
 			float flDelta = flLastDisplayed - flRounded;
 			if (flDelta >= 3.0f)
 			{
-				// Significant decrease - show it
 				flLastDisplayed = flRounded;
-				iFramesAtLow = 0;
 			}
-			else
-			{
-				// Minor dip (< 3 units) - ignore it
-				iFramesAtLow++;
-			}
-		}
-		else
-		{
-			// Same velocity - reset counter
-			iFramesAtLow = 0;
 		}
 
-		m_pSpeedVar->SetFloatValue(flLastDisplayed);
+		m_pSpeedVar->SetFloatValue(flLastDisplayed * m_flScale);
 	}
 
 	void Release() override
@@ -276,7 +429,6 @@ public:
 
 // Static member initialization
 float CSpeedProxy::flLastDisplayed = 0.0f;
-int CSpeedProxy::iFramesAtLow = 0;
 
 // Proxy factory
 class CProxyFactory : public IMaterialProxyFactory
@@ -451,6 +603,28 @@ public:
 			g_pProxyFactory->SetOriginalFactory(g_pOldFactory);
 			g_pMatSys->SetMaterialProxyFactory(g_pProxyFactory);
 			LogLine("[2DSpeedProxy] Installed proxy factory: %p", g_pProxyFactory);
+
+			// IMPORTANT: materials that were already precached (menu, level load,
+			// HUD sprites loaded early) had their proxy list built against the OLD
+			// factory before we ever got a chance to install ours - swapping the
+			// factory pointer alone does NOT retroactively rebuild proxies on
+			// already-loaded IMaterial instances.
+			//
+			// We do NOT attempt a forced reload here:
+			//   - g_pMatSys->ReloadMaterials() crashes (ESP/RTC #0) because our
+			//     local imaterialsystem.h is versioned "VMaterialSystem079" while
+			//     L4D2's actual factory exposes "VMaterialSystem080" - a
+			//     different, incompatible vtable layout.
+			//   - The console command fallback ("mat_reloadmaterials") doesn't
+			//     exist in this build ("Unknown command") - likely compiled out
+			//     as dev-only in retail L4D2.
+			//
+			// Instead: make sure this plugin is loaded (plugin_load) BEFORE
+			// joining/loading any map, ideally right at the main menu with
+			// nothing connected. That way every HUD material (your gauge,
+			// nOaimbot's velometer, the quake-speedo, etc.) gets created and
+			// precached for the FIRST time already pointed at our factory - no
+			// retroactive rebind required.
 		}
 
 		ConColorMsg({ 0, 255, 255, 255 }, "[2DSpeedProxy] Successfully loaded\n");
@@ -530,6 +704,19 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID reserved)
 	if (reason == DLL_PROCESS_ATTACH)
 	{
 		LogLine("[2DSpeedProxy] DLL_PROCESS_ATTACH");
+	}
+	else if (reason == DLL_PROCESS_DETACH)
+	{
+		// Per MSDN: if lpvReserved (here: `reserved`) is non-NULL, the process
+		// is terminating (not a clean FreeLibrary call) - other DLLs, including
+		// tier0.dll, may already be unloaded/torn down at this point, so it is
+		// unsafe to touch them (or do any cleanup at all). Just return
+		// immediately in that case; the OS reclaims everything anyway.
+		if (reserved != nullptr)
+		{
+			return TRUE;
+		}
+		LogLine("[2DSpeedProxy] DLL_PROCESS_DETACH (clean unload)");
 	}
 	return TRUE;
 }
