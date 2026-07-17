@@ -1,19 +1,40 @@
 # L4D2 2D Velocity Speed Proxy
 
-A small plugin (DLL) for Left 4 Dead 2, built for local/listen server use in TAS/TSA or even in RTA speedrunning. It shows the player's 2D speed (ground speed, ignoring vertical movement) through a material proxy called PlayerSpeed, giving a clean bhop-style speed number instead of raw 3D velocity. Not intended for multiplayer or dedicated servers.
+A small plugin (DLL) for Left 4 Dead 2, built for local/listen server use in TAS/TSA or even in RTA speedrunning. It reads the player's speed and feeds it into a material proxy value called `$speed`, matching `cl_showpos 1` by default, with settings a `.vmt` file can use to change how the number is read — so it works with other people's existing speedometer/velometer add-ons without editing their files. Not intended for multiplayer or dedicated servers.
 
 ## What it does
 
 - Reads the local player's velocity directly from game memory.
-- Shows only horizontal (2D) speed, which is what bhop players care about.
-- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles (e.g. -78 degree throwable/launcher boosts) where the jump starts near-zero horizontal velocity.
-- Smooths out small jitters so the number on screen does not flicker.
-- Plugs into the game's material system so any material using `$speed` can display this value.
+- Feeds a live speed number into the game's material system through the `PlayerSpeed` proxy, written into `$speed` by default.
+  - By default (`mode "3d"`), this is the raw, unsmoothed speed number, matching `cl_showpos 1` exactly.
+  - With `mode "2d"` set in a material's `.vmt` file, the number becomes horizontal-only (2D) speed with smoothing applied, so it does not flicker on tiny jitters — meant for a clean bhop-style readout.
+  - A material can also set `resultVar` (which shader variable to write into) and `scale` (multiply the number by this) in the same block, so this plugin works with other people's existing speedometer/velometer add-ons without editing their files.
+- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles where the jump starts near-zero horizontal velocity — in both `mode "3d"` and `mode "2d"`.
 - Works during demo playback. (Even for demos recorded on official servers without the plugin loaded.)
 
-The plugin loads as a **server plugin**. Once loaded, it replaces the game's material proxy factory with its own. Whenever the game asks for a proxy named `PlayerSpeed`, the plugin hands back its own code instead, which calculates and updates the speed value every frame.
+The plugin loads as a **server plugin**. Once loaded, it replaces the game's material proxy factory with its own. Whenever the game asks for a proxy called `PlayerSpeed`, the plugin hands back its own code instead, which calculates and updates the speed value every frame. Any other proxy name is passed straight through to the game's original factory, so nothing else breaks.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full breakdown with diagrams.
+
+## Using `$speed` with other people's speedometer add-ons
+
+Because a material can set its own `resultVar`, `scale`, and `mode` inside its `Proxies { PlayerSpeed { ... } } }` block, this plugin does not force every speedometer to use the same settings. Example:
+
+```
+Proxies {
+    PlayerSpeed {
+        resultVar "$speed"   // which shader var to write into (default: $speed)
+        scale 1               // multiply the raw number by this (default: 1)
+        mode "2d"             // "3d" (default, raw just like what you see in `cl_showpos 1`) or "2d" (horizontal-only, smoothed)
+    }
+}
+```
+
+An existing `.vmt` file that does not set any of these still works, because these settings all default to matching `cl_showpos 1`'s raw 3D number. A material can also declare `PlayerSpeed` more than once with a different `resultVar`/`mode` on each, to get both a raw number and a smoothed number at the same time on the same material.
+
+## Load order matters
+
+Materials only get hooked by this plugin the first time the game loads them. If a speedometer material was already loaded before this plugin started (for example, if you load the plugin while already in a map), that material keeps using whatever it was using before and will not pick up this plugin's values. To make sure every speedometer/HUD material gets hooked correctly, load this plugin (`plugin_load addons/l4d2_2dvel`, or through the `.vdf` manifest) **before** joining or loading a map — ideally right at the main menu with nothing connected.
 
 ## Project structure
 
@@ -45,7 +66,7 @@ l4d2_2dvel/
 | Git | To download the SDK |
 | Left 4 Dead 2 SDK (hl2sdk) | Provides the game headers and libraries, see below |
 | Left 4 Dead 2 (the game) | To actually test and run the plugin |
-| A speedometer material/HUD add-on | Must define a `$speed` proxy variable on its material — this plugin only feeds the number, it does not draw anything on screen |
+| A speedometer material/HUD add-on | Must define a `$speed` (or whatever `resultVar` you choose) proxy variable on its material — this plugin only feeds the number, it does not draw anything on screen |
 
 ## Installation
 
@@ -65,6 +86,8 @@ git clone --branch l4d2 --single-branch https://github.com/alliedmodders/hl2sdk.
 ```
 
 This downloads the `l4d2` branch of AlliedModders' `hl2sdk` repository, the branch made specifically for Left 4 Dead 2.
+
+> **Note:** the `hl2sdk` `l4d2` branch's own `imaterialsystem.h` header labels itself as interface version `VMaterialSystem079`, but the actual running game exposes `VMaterialSystem080` — a different, incompatible layout. This plugin already works around that (see [`ARCHITECTURE.md`](ARCHITECTURE.md)), so you do not need to change anything, but keep this in mind if you add new calls into the material system interface yourself — test them carefully, since a wrong assumption here can cause a crash on the affected call.
 
 ### 3. Match the folder path
 
@@ -105,7 +128,7 @@ If the paths in the `.vcxproj` are still hardcoded to a personal `C:\Users\...` 
    This tells the engine to automatically load the DLL on startup. Note there is no `.dll` extension in the `"file"` value, the engine appends it automatically.
 3. Start (or restart) the server. The plugin loads on its own, no extra command needed.
 
-If you would rather load it manually instead of using the `.vdf` manifest, you can skip step 2 and use the engine's `plugin_load addons/l4d2_2dvel` console command instead.
+If you would rather load it manually instead of using the `.vdf` manifest, you can skip step 2 and use the engine's `plugin_load addons/l4d2_2dvel` console command instead. If you load it manually, remember the load order note above — load it before joining a map.
 
 ### 6. Enable the `-insecure` launch option
 
@@ -129,3 +152,7 @@ Without this, the game will refuse to load the plugin.
 - All required headers (`eiface.h`, `cdll_int.h`, `imaterialsystem.h`, etc.) come from `hl2sdk`
 
 Nothing else is required beyond Visual Studio and the SDK.
+
+## Known non-issue: exception message on `quit`
+
+If you have a debugger attached (e.g. Visual Studio) and type `quit` in the console, you may see an exception message pointing at `tier0.dll`. This is a normal side effect of Windows unloading DLLs in an unpredictable order while the whole game process is shutting down, not something wrong with this plugin's code — the process still exits normally right after (exit code 0), and the message does not appear at all without a debugger attached. It is safe to ignore. Disconnecting from a map (instead of fully quitting) does not trigger this at all.
