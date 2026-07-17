@@ -30,7 +30,9 @@ Proxies {
 }
 ```
 
-An existing `.vmt` file that does not set any of these still works, because these settings all default to matching `cl_showpos 1`'s raw 3D number. A material can also declare `PlayerSpeed` more than once with a different `resultVar`/`mode` on each, to get both a raw number and a smoothed number at the same time on the same material.
+Most speedometer/velometer add-ons you'll find on the Workshop only use `$speed` with no `mode` set at all, so they load correctly out of the box, but they'll show raw 3D speed (matching `cl_showpos 1`), not a clean bhop-style number. If you want the smoothed, horizontal-only reading instead, you'll need to open that add-on's `.vmt` file yourself and add `mode "2d"` inside its `PlayerSpeed` block. Make sure this plugin is installed first (see [Installation](#installation) below) before testing this.
+
+A material can also declare `PlayerSpeed` more than once with a different `resultVar`/`mode` on each, to get both a raw number and a smoothed number at the same time on the same material.
 
 ## Load order matters
 
