@@ -25,7 +25,7 @@ Proxies {
     PlayerSpeed {
         resultVar "$speed"   // which shader var to write into (default: $speed)
         scale 1               // multiply the raw number by this (default: 1)
-        mode "2d"             // "3d" (default, raw just like what you see in `cl_showpos 1`) or "2d" (horizontal-only, smoothed)
+        mode "3d"             // "3d" (default, raw just like what you see in `cl_showpos 1`) or "2d" (horizontal-only, smoothed)
     }
 }
 ```
