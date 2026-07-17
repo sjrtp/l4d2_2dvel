@@ -145,6 +145,9 @@ Left 4 Dead 2 blocks unsigned server plugins like this one while VAC (Valve Anti
 
 Without this, the game will refuse to load the plugin.
 
+# **WARNING**:
+Do not UNLOAD THEN LOAD/RELOAD the plugin while the game is running, as this will cause a crash. (Planning to fix that soon)
+
 ## Dependencies at a glance
 
 - `tier0.lib`, `tier1.lib`, `mathlib.lib`, `vstdlib.lib` come from the `hl2sdk`
@@ -153,6 +156,12 @@ Without this, the game will refuse to load the plugin.
 
 Nothing else is required beyond Visual Studio and the SDK.
 
+<<<<<<< HEAD
 ## Known non-issue: exception message on `quit`
 
 If you have a debugger attached (e.g. Visual Studio) and type `quit` in the console, you may see an exception message pointing at `tier0.dll`. This is a normal side effect of Windows unloading DLLs in an unpredictable order while the whole game process is shutting down, not something wrong with this plugin's code — the process still exits normally right after (exit code 0), and the message does not appear at all without a debugger attached. It is safe to ignore. Disconnecting from a map (instead of fully quitting) does not trigger this at all.
+=======
+
+
+➡[Download v1.0 Release](https://github.com/sjrtp/l4d2_2dvel/releases/tag/v1.0)
+>>>>>>> 607cbeb09650fdfb87b00aaca16e7b42e62da8ff
