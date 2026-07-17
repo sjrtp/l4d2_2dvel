@@ -164,7 +164,7 @@ Nothing else is required beyond Visual Studio and the SDK.
 ## Known non-issue: exception message on `quit`
 
 If you have a debugger attached (e.g. Visual Studio) and type `quit` in the console, you may see an exception message pointing at `tier0.dll`. This is a normal side effect of Windows unloading DLLs in an unpredictable order while the whole game process is shutting down, not something wrong with this plugin's code — the process still exits normally right after (exit code 0), and the message does not appear at all without a debugger attached. It is safe to ignore. Disconnecting from a map (instead of fully quitting) does not trigger this at all.
-=======
+
 
 ## Download
 ➡[Download v1.0 Release](https://github.com/sjrtp/l4d2_2dvel/releases/tag/v1.0)
