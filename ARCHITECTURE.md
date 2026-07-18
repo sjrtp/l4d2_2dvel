@@ -85,7 +85,7 @@ A material's own `.vmt` file can also change two more things inside its `Proxies
 - `resultVar` — which shader variable to write the number into (default: `$speed`). This matters because other add-ons may already use the `PlayerSpeed` proxy name with a different variable name.
 - `scale` — multiplies the final number by this amount (default: `1`, meaning no change).
 
-A material can also declare `PlayerSpeed` more than once in the same `Proxies {}` block, each with a different `resultVar`/`mode`, to get both a raw number and a smoothed number written into two separate shader variables on the same material at the same time.
+If a material's `.vmt` declares `PlayerSpeed` more than once in the same `Proxies {}` block (for example, to try to get a raw number and a smoothed number into two separate variables at once), only the first declaration is used — the plugin reads the file itself (not the engine's parsed copy) and always finds the first `PlayerSpeed` block in the text, regardless of how many proxy instances the engine actually creates from it. This is a known limitation, not a supported feature.
 
 ### 6. Unloading
 

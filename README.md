@@ -34,7 +34,7 @@ Proxies {
 
 Most speedometer/velometer add-ons you'll find on the Workshop only use `$speed` with no `mode` set at all, so they load correctly out of the box, but they'll show raw 3D speed (matching `cl_showpos 1`), not a clean bhop-style number. If you want the smoothed, horizontal-only reading instead, you'll need to open that add-on's `.vmt` file yourself and add `mode "2d"` inside its `PlayerSpeed` block. Make sure this plugin is installed first (see [Download](#download) link below) before testing this.
 
-A material can also declare `PlayerSpeed` more than once with a different `resultVar`/`mode` on each, to get both a raw number and a smoothed number at the same time on the same material.
+> A material's `.vmt` should only declare `PlayerSpeed` **once** per `Proxies {}` block. The plugin reads the raw file text to find its settings and always uses the first `PlayerSpeed` block it finds, so a second declaration in the same file will not get its own separate `resultVar`/`mode` — it will just be ignored.
 
 ## Load order matters
 
@@ -159,11 +159,6 @@ Do not UNLOAD THEN LOAD/RELOAD the plugin while the game is running, as this wil
 - All required headers (`eiface.h`, `cdll_int.h`, `imaterialsystem.h`, etc.) come from `hl2sdk`
 
 Nothing else is required beyond Visual Studio and the SDK.
-
-
-## Known non-issue: exception message on `quit`
-
-If you have a debugger attached (e.g. Visual Studio) and type `quit` in the console, you may see an exception message pointing at `tier0.dll`. This is a normal side effect of Windows unloading DLLs in an unpredictable order while the whole game process is shutting down, not something wrong with this plugin's code — the process still exits normally right after (exit code 0), and the message does not appear at all without a debugger attached. It is safe to ignore. Disconnecting from a map (instead of fully quitting) does not trigger this at all.
 
 
 ## Download
