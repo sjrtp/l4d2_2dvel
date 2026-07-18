@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <cctype>
+#include <cstdlib>
 
 #include "eiface.h"
 #include "engine/iserverplugin.h"
@@ -12,11 +14,48 @@
 #include "icliententity.h"
 #include "iclientunknown.h"
 #include "client_class.h"
+#include "tier1/KeyValues.h"
+#include "filesystem.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/imaterial.h"
 #include "materialsystem/imaterialvar.h"
 #include "materialsystem/imaterialproxy.h"
 #include "materialsystem/imaterialproxyfactory.h"
+
+// === SEH-guarded KeyValues reads ===
+// A C++ try/catch does NOT catch access violations unless the project has
+// /EHa enabled - it only catches genuine C++ exceptions by default (/EHsc).
+// Windows SEH (__try/__except) catches access violations regardless of that
+// compiler setting, which is what we actually need here: pKeyValues has
+// crashed GetString() even though it looked like a legitimate, non-null
+// pointer when logged right before the call. These are isolated in their own
+// plain functions because __try/__except cannot safely surround C++ objects
+// that have destructors in the same function.
+static const char* SafeGetKeyValuesString(KeyValues* pKV, const char* pKeyName, const char* pDefault)
+{
+	__try
+	{
+		return pKV->GetString(pKeyName, pDefault);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		OutputDebugStringA("[2DSpeedProxy] SEH: access violation reading KeyValues string - using default\n");
+		return pDefault;
+	}
+}
+
+static float SafeGetKeyValuesFloat(KeyValues* pKV, const char* pKeyName, float flDefault)
+{
+	__try
+	{
+		return pKV->GetFloat(pKeyName, flDefault);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		OutputDebugStringA("[2DSpeedProxy] SEH: access violation reading KeyValues float - using default\n");
+		return flDefault;
+	}
+}
 
 // Logging
 static void LogLine(const char* fmt, ...)
@@ -41,6 +80,7 @@ struct Vector3D
 // Globals
 static IMaterialSystem* g_pMatSys = nullptr;
 static IMaterialProxyFactory* g_pOldFactory = nullptr;
+static IFileSystem* g_pFileSystem = nullptr;
 static IVEngineClient* g_pEngine = nullptr;
 static IClientEntityList* g_pEntityList = nullptr;
 static IBaseClientDLL* g_pClientDLL = nullptr;
@@ -77,14 +117,16 @@ static bool FindRecvPropOffset(RecvTable* pTable, const char* propName, int base
 
 // Resolve m_vecVelocity, m_iObserverMode, and m_hObserverTarget offsets at runtime
 // by walking client RecvTable. Observer offsets are best-effort (not fatal if missing).
-static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
+// SEH-guarded wrapper: on pre-TLS builds, pClientDLL->GetAllClasses() and the
+// subsequent RecvTable walk are virtual calls resolved against the vtable
+// layout our SDK headers (compiled for post-TLS L4D2) expect. That layout can
+// differ from the actual pre-TLS binary - it's the same class of ABI mismatch
+// that hit KeyValues, just on a different interface. GetAllClasses() has been
+// observed to return outright garbage (e.g. 0x160) instead of a real pointer
+// on such builds. Guarding the whole walk means a mismatch here degrades to
+// the existing hardcoded fallback offset instead of crashing the game.
+static bool ResolveVelocityOffsetImpl(IBaseClientDLL* pClientDLL)
 {
-	if (!pClientDLL)
-	{
-		LogLine("[2DSpeedProxy] ResolveVelocityOffset called with NULL pClientDLL!");
-		return false;
-	}
-
 	ClientClass* pClass = pClientDLL->GetAllClasses();
 
 	if (!pClass)
@@ -158,6 +200,31 @@ static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
 	}
 	LogLine("[2DSpeedProxy] Could not find CTerrorPlayer client class -- dumped %d classes above", iCount);
 	return false;
+}
+
+// Public entry point - same name/signature the rest of the file already calls.
+// Wraps the actual walk in SEH so a vtable/ABI mismatch (garbage pointer from
+// GetAllClasses(), bad RecvTable pointers, etc.) can't take the process down;
+// it just fails this resolution attempt and the caller's existing hardcoded
+// fallback (g_iVelocityOffset = 0x100) takes over instead.
+static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
+{
+	if (!pClientDLL)
+	{
+		LogLine("[2DSpeedProxy] ResolveVelocityOffset called with NULL pClientDLL!");
+		return false;
+	}
+
+	__try
+	{
+		return ResolveVelocityOffsetImpl(pClientDLL);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		LogLine("[2DSpeedProxy] SEH: access violation walking client classes/RecvTable "
+			"(GetAllClasses ABI mismatch on this build) - falling back to hardcoded offset");
+		return false;
+	}
 }
 
 // === Velocity Calculation with Smoothing ===
@@ -300,6 +367,183 @@ static float ComputeSmoothedLocalPlayerSpeed2D(bool bForce3D = false)
 	return iCount > 0 ? (flSum / iCount) : 0.0f;
 }
 
+// === Real VMT-text auto-detection (replaces the old hardcoded whitelist) ===
+// We no longer guess which shader var a material uses, or hardcode its mode.
+// Instead we open the material's own .vmt off disk (via IFileSystem - not
+// KeyValues, which is what crashes on this pre-TLS build) and read the
+// "PlayerSpeed" proxy block's actual "resultVar", "scale" and "mode" keys.
+//
+// Rule (per spec): if the vmt's PlayerSpeed block has no "mode" key at all,
+// treat it as raw 3D - i.e. identical to cl_showpos 1 velocity, unsmoothed,
+// jump/bhop spikes and all. Only an explicit mode "2d" turns on the
+// smoothed/hysteresis horizontal-only path. This makes every material in the
+// addon (and anything the user adds) work automatically, with zero editing
+// of this file required when someone edits a .vmt.
+struct VmtProxyConfig
+{
+	char  szResultVar[64] = { 0 };
+	float flScale = 1.0f;
+	bool  bMode2D = false; // false = raw 3D (default when "mode" key absent)
+	bool  bValid = false;
+};
+
+// Find needle in haystack, case-insensitive. Minimal, no CRT locale nonsense.
+static const char* FindCaseInsensitive(const char* pHaystack, const char* pNeedle)
+{
+	if (!pHaystack || !pNeedle || !*pNeedle) return nullptr;
+	size_t needleLen = strlen(pNeedle);
+	for (const char* p = pHaystack; *p; p++)
+	{
+		size_t i = 0;
+		for (; i < needleLen; i++)
+		{
+			if (!p[i]) break;
+			if (std::tolower((unsigned char)p[i]) != std::tolower((unsigned char)pNeedle[i])) break;
+		}
+		if (i == needleLen) return p;
+	}
+	return nullptr;
+}
+
+// Extract the token following pszKey inside [pBlockStart, pBlockEnd) into
+// pOutBuf. Plain pointer scanning only - no STL, no heap allocation, so this
+// can't clash with the host process's CRT/heap the way std::string can.
+static bool ExtractKeyValue(const char* pBlockStart, const char* pBlockEnd, const char* pszKey,
+	char* pOutBuf, size_t iOutBufSize)
+{
+	if (!pBlockStart || !pBlockEnd || pBlockEnd <= pBlockStart || iOutBufSize == 0)
+		return false;
+
+	size_t iKeyLen = strlen(pszKey);
+	const char* pKey = nullptr;
+
+	for (const char* p = pBlockStart; p + iKeyLen <= pBlockEnd; p++)
+	{
+		size_t i = 0;
+		for (; i < iKeyLen; i++)
+		{
+			if (std::tolower((unsigned char)p[i]) != std::tolower((unsigned char)pszKey[i])) break;
+		}
+		if (i == iKeyLen) { pKey = p; break; }
+	}
+	if (!pKey) return false;
+
+	const char* p = pKey + iKeyLen;
+	// must not be a match against a longer key sharing this prefix
+	if (p < pBlockEnd && (std::isalnum((unsigned char)*p) || *p == '_'))
+		return false;
+
+	bool bWasQuoted = false;
+	while (p < pBlockEnd && (*p == '"' || *p == ' ' || *p == '\t'))
+	{
+		if (*p == '"') bWasQuoted = true;
+		p++;
+	}
+
+	size_t iOut = 0;
+	if (bWasQuoted)
+	{
+		while (p < pBlockEnd && *p != '"' && iOut + 1 < iOutBufSize)
+			pOutBuf[iOut++] = *p++;
+	}
+	else
+	{
+		while (p < pBlockEnd && !std::isspace((unsigned char)*p) && *p != '{' && *p != '}' && *p != '"'
+			&& iOut + 1 < iOutBufSize)
+			pOutBuf[iOut++] = *p++;
+	}
+	pOutBuf[iOut] = '\0';
+	return iOut > 0;
+}
+
+// Read materials/<pMaterial->GetName()>.vmt directly off disk, locate the
+// Proxies { PlayerSpeed { ... } } block, and pull out its real settings.
+// Uses a fixed local buffer (no std::string/new) - VMTs are a few KB at most.
+static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConfig& outCfg)
+{
+	if (!g_pFileSystem || !pszMaterialName || !*pszMaterialName)
+		return false;
+
+	char szPath[512];
+	_snprintf_s(szPath, sizeof(szPath), _TRUNCATE, "materials/%s.vmt", pszMaterialName);
+
+	FileHandle_t hFile = g_pFileSystem->Open(szPath, "rt", "GAME");
+	if (!hFile)
+	{
+		LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: could not open \"%s\"", szPath);
+		return false;
+	}
+
+	const unsigned int kMaxVmtSize = 16384;
+	unsigned int uSize = g_pFileSystem->Size(hFile);
+	if (uSize == 0 || uSize > kMaxVmtSize)
+	{
+		LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: \"%s\" bad size %u", szPath, uSize);
+		g_pFileSystem->Close(hFile);
+		return false;
+	}
+
+	char szText[kMaxVmtSize + 1];
+	int iRead = g_pFileSystem->Read(szText, (int)uSize, hFile);
+	g_pFileSystem->Close(hFile);
+
+	if (iRead <= 0)
+		return false;
+	szText[iRead] = '\0';
+	const char* pTextEnd = szText + iRead;
+
+	// Locate "PlayerSpeed" then its enclosing { ... } block.
+	const char* pPS = FindCaseInsensitive(szText, "PlayerSpeed");
+	if (!pPS)
+	{
+		LogLine("[2DSpeedProxy] \"%s\" has no PlayerSpeed proxy - skipping", szPath);
+		return false;
+	}
+
+	const char* pOpen = strchr(pPS, '{');
+	if (!pOpen || pOpen >= pTextEnd)
+		return false;
+
+	int iDepth = 0;
+	const char* pClose = nullptr;
+	for (const char* p = pOpen; p < pTextEnd; p++)
+	{
+		if (*p == '{') iDepth++;
+		else if (*p == '}')
+		{
+			iDepth--;
+			if (iDepth == 0) { pClose = p; break; }
+		}
+	}
+	if (!pClose)
+		return false;
+
+	char szScale[32] = { 0 };
+	char szMode[32] = { 0 };
+
+	bool bHasResultVar = ExtractKeyValue(pOpen, pClose + 1, "resultVar", outCfg.szResultVar, sizeof(outCfg.szResultVar));
+	bool bHasScale = ExtractKeyValue(pOpen, pClose + 1, "scale", szScale, sizeof(szScale));
+	bool bHasMode = ExtractKeyValue(pOpen, pClose + 1, "mode", szMode, sizeof(szMode));
+
+	if (!bHasResultVar)
+	{
+		LogLine("[2DSpeedProxy] \"%s\" PlayerSpeed block has no resultVar - skipping", szPath);
+		return false;
+	}
+
+	outCfg.flScale = bHasScale ? (float)atof(szScale) : 1.0f;
+
+	// THE RULE: no "mode" key at all -> raw 3D (cl_showpos-style), same as
+	// numbers.vmt today. Only an explicit mode "2d" enables smoothing.
+	outCfg.bMode2D = bHasMode && (FindCaseInsensitive(szMode, "2d") != nullptr);
+	outCfg.bValid = true;
+
+	LogLine("[2DSpeedProxy] \"%s\" -> resultVar=%s scale=%.2f mode=%s (read from vmt on disk)",
+		szPath, outCfg.szResultVar, outCfg.flScale, outCfg.bMode2D ? "2d" : "3d (default)");
+
+	return true;
+}
+
 // PlayerSpeed material proxy
 class CSpeedProxy : public IMaterialProxy
 {
@@ -312,40 +556,46 @@ private:
 public:
 	bool Init(IMaterial* pMaterial, KeyValues* pKeyValues) override
 	{
-		// Honor resultVar from the VMT's Proxies{} block (engine convention),
-		// defaulting to $speed only if the material doesn't specify one.
-		// This matters because "PlayerSpeed" may already be used by other
-		// materials (e.g. vgui/hud/arrow) with a DIFFERENT resultVar - hardcoding
-		// "$speed" here would hijack those and break them (FindVar fails ->
-		// "No such variable" spam -> proxy silently stuck doing nothing).
-		const char* pszResultVar = pKeyValues ? pKeyValues->GetString("resultVar", "$speed") : "$speed";
-		bool bFound = false;
-		m_pSpeedVar = pMaterial->FindVar(pszResultVar, &bFound);
-		if (!bFound)
+		(void)pKeyValues; // deliberately never touched - see comment above
+
+		const char* pszMatName = pMaterial ? pMaterial->GetName() : nullptr;
+		LogLine("[2DSpeedProxy] PlayerSpeed::Init material = \"%s\"", pszMatName ? pszMatName : "(null)");
+
+		if (!pMaterial)
 		{
-			LogLine("[2DSpeedProxy] PlayerSpeed: material has no var \"%s\" - skipping (not our material)", pszResultVar);
-			m_pSpeedVar = nullptr;
+			m_flScale = 1.0f;
+			m_bForce3D = true;
+			return false;
 		}
 
-		// Honor "scale" from the Proxies{} block, same as the real engine proxy.
-		// Defaults to 1.0 (no-op) so our own VMT (scale 1) still gets raw,
-		// cl_showpos-exact values - but third-party materials like nOaimbot's
-		// velometer, which ship their own scale key expecting it to actually be
-		// applied, get properly mapped instead of being fed raw unscaled speed
-		// (which is what was pegging their needle to max).
-		m_flScale = pKeyValues ? pKeyValues->GetFloat("scale", 1.0f) : 1.0f;
+		VmtProxyConfig cfg;
+		if (!ReadPlayerSpeedProxyConfig(pszMatName, cfg))
+		{
+			LogLine("[2DSpeedProxy] PlayerSpeed: could not read a valid config for \"%s\" from its vmt - skipping (not our material)",
+				pszMatName ? pszMatName : "(null)");
+			m_flScale = 1.0f;
+			m_bForce3D = true;
+			return false;
+		}
 
-		// Honor "mode" from the Proxies{} block. Default is "3d": raw, unsmoothed,
-		// matches cl_showpos exactly (confirmed empirically against nOaimbot's
-		// UNEDITED original digits.vmt, which has no "mode" key at all and is
-		// expected to match cl_showpos with zero edits). "2d" is horizontal-only
-		// speed WITH smoothing/hysteresis applied (see OnBind) - e.g. for a
-		// flicker-free bhop-style gauge. Noclip and ladder/steep-launch detection
-		// still force full 3D regardless of this setting either way.
-		const char* pszMode = pKeyValues ? pKeyValues->GetString("mode", "3d") : "3d";
-		m_bForce3D = (_stricmp(pszMode, "2d") != 0);
+		bool bFound = false;
+		m_pSpeedVar = pMaterial->FindVar(cfg.szResultVar, &bFound);
+		if (!bFound || !m_pSpeedVar)
+		{
+			LogLine("[2DSpeedProxy] PlayerSpeed: vmt for \"%s\" names resultVar \"%s\" but FindVar failed - skipping",
+				pszMatName ? pszMatName : "(null)", cfg.szResultVar);
+			m_flScale = 1.0f;
+			m_bForce3D = true;
+			return false;
+		}
 
-		return m_pSpeedVar != nullptr;
+		m_flScale = cfg.flScale;
+		m_bForce3D = !cfg.bMode2D; // no "mode" key, or anything other than "2d", = raw 3D
+
+		LogLine("[2DSpeedProxy] PlayerSpeed: material \"%s\" -> resultVar=%s scale=%.2f mode=%s (auto-detected from vmt on disk)",
+			pszMatName ? pszMatName : "(null)", cfg.szResultVar, m_flScale, m_bForce3D ? "3d" : "2d");
+
+		return true;
 	}
 
 	void OnBind(void* pRenderable) override
@@ -559,6 +809,36 @@ public:
 		if (!g_pEntityList)
 			LogLine("[2DSpeedProxy] FAILED to get IClientEntityList (version \"%s\", code %d)",
 				VCLIENTENTITYLIST_INTERFACE_VERSION, iEntListReturnCode);
+
+		// Get filesystem interface (from filesystem_stdio.dll) so we can read
+		// .vmt files directly off disk for PlayerSpeed's real mode/scale/resultVar.
+		HMODULE hFileSys = GetModuleHandleA("filesystem_stdio.dll");
+		if (!hFileSys)
+		{
+			LogLine("[2DSpeedProxy] FAILED to get filesystem_stdio.dll module handle - vmt auto-detect will not work");
+		}
+		else
+		{
+			auto fileSysFactory = reinterpret_cast<CreateInterfaceFn>(
+				GetProcAddress(hFileSys, "CreateInterface"));
+
+			if (!fileSysFactory)
+			{
+				LogLine("[2DSpeedProxy] FAILED to get filesystem_stdio.dll's CreateInterface");
+			}
+			else
+			{
+				int iFileSysReturnCode = -999;
+				g_pFileSystem = static_cast<IFileSystem*>(
+					fileSysFactory(FILESYSTEM_INTERFACE_VERSION, &iFileSysReturnCode));
+
+				if (!g_pFileSystem)
+					LogLine("[2DSpeedProxy] FAILED to get IFileSystem (version \"%s\", code %d)",
+						FILESYSTEM_INTERFACE_VERSION, iFileSysReturnCode);
+				else
+					LogLine("[2DSpeedProxy] Got filesystem: %p", g_pFileSystem);
+			}
+		}
 
 		// Get material system (from materialsystem.dll)
 		HMODULE hMatSys = GetModuleHandleA("materialsystem.dll");
