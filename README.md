@@ -9,8 +9,9 @@ A small plugin (DLL) for Left 4 Dead 2, built for local/listen server use in TAS
   - By default (`mode "3d"`), this is the raw, unsmoothed speed number, matching `cl_showpos 1` exactly.
   - With `mode "2d"` set in a material's `.vmt` file, the number becomes horizontal-only (2D) speed with smoothing applied, so it does not flicker on tiny jitters — meant for a clean bhop-style readout.
   - A material can also set `resultVar` (which shader variable to write into) and `scale` (multiply the number by this) in the same block, so this plugin works with other people's existing speedometer/velometer add-ons without editing their files.
-- Switches to full 3D speed automatically when the player is on a ladder, or when boosting/launched at steep angles where the jump starts near-zero horizontal velocity — in `mode "2d"`.
+- Switches to full 3D speed automatically when the player is on a real ladder or in noclip, in `mode "2d"`.
 - Works during demo playback. (Even for demos recorded on official servers without the plugin loaded.)
+- Can also show what you're doing on a small label (NOCLIP / CLIMB) through a second proxy, `PlayerSpeedState`, which writes into `$frame` for a material that has those pictures baked in.
 
 The plugin loads as a **server plugin**. Once loaded, it replaces the game's material proxy factory with its own. Whenever the game asks for a proxy called `PlayerSpeed`, the plugin hands back its own code instead, which calculates and updates the speed value every frame. Any other proxy name is passed straight through to the game's original factory, so nothing else breaks.
 
@@ -26,7 +27,8 @@ Proxies {
         resultVar "$speed"   // which shader var to write into (default: $speed)
         scale 1               // multiply the raw number by this (default: 1)
         mode "2d"// <------  
-            //^ "3d" (Raw values just like what you see from VEL: in `cl_showpos 1`)
+            //^ leave this line out entirely for raw 3D - it'll act like a normal
+            //  velometer reading raw speed, matching `cl_showpos 1`
             //^ "2d" (horizontal-only, smoothed like what you see in hl2 TAS speedruns uses UPS instead of VEL)
     }
 }
@@ -35,6 +37,26 @@ Proxies {
 Most speedometer/velometer add-ons you'll find on the Workshop only use `$speed` with no `mode` set at all, so they load correctly out of the box, but they'll show raw 3D speed (matching `cl_showpos 1`), not a clean bhop-style number. If you want the smoothed, horizontal-only reading instead, you'll need to open that add-on's `.vmt` file yourself and add `mode "2d"` inside its `PlayerSpeed` block. Make sure this plugin is installed first (see [Download](#download) link below) before testing this.
 
 > A material's `.vmt` should only declare `PlayerSpeed` **once** per `Proxies {}` block. The plugin reads the raw file text to find its settings and always uses the first `PlayerSpeed` block it finds, so a second declaration in the same file will not get its own separate `resultVar`/`mode` — it will just be ignored.
+
+## Showing a NOCLIP / CLIMB label
+
+If a material also has a `PlayerSpeedState` proxy in its `Proxies {}` block, the plugin will write a small number into `$frame` (or a different var if you set `resultVar`), meant for a texture with a few pictures stacked in it:
+
+```
+Proxies {
+    PlayerSpeedState {
+        resultVar "$frame"   // which shader var to write into (default: $frame)
+    }
+}
+```
+
+The number it writes:
+
+- `1` = normal (default, also what shows if this plugin is not loaded)
+- `2` = climbing a real ladder
+- `3` = noclip is on
+
+There are two more numbers, `0` and `4`, saved as extra spots in the picture strip for later. Nothing currently writes them, so they are not used right now.
 
 ## Load order matters
 

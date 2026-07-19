@@ -22,6 +22,11 @@ flowchart TD
     K1 --> L[Writes value into<br/>$speed]
     K2 --> L
     L --> M[HUD / material<br/>shows the speed]
+    H --> N{On ladder or<br/>in noclip?}
+    N -->|yes| O[Writes 2 or 3<br/>into $frame]
+    N -->|no| P[Writes 1<br/>into $frame]
+    O --> Q[HUD label shows<br/>CLIMB / NOCLIP]
+    P --> Q
 ```
 
 ## Step by step
@@ -78,7 +83,7 @@ The number becomes horizontal-only (2D) speed, with smoothing applied so it does
 - Speed increases are shown immediately.
 - Speed decreases are only shown once they are big enough (3+ units), so tiny dips do not cause flicker.
 
-**Both modes** check if the player is on a ladder (or launched at a steep angle, which looks similar in raw velocity) or in noclip, and switch to full 3D speed automatically in those cases, overriding `mode "2d"`'s normal horizontal-only reading. This is because those situations are meant to always show real 3D movement, not get treated as bhop jitter to smooth away.
+**Both modes** check if the player is on a real ladder (using the game's own movement flag, not a velocity guess) or in noclip, and switch to full 3D speed automatically in those cases, overriding `mode "2d"`'s normal horizontal-only reading. This is because those situations are meant to always show real 3D movement, not get treated as bhop jitter to smooth away.
 
 A material's own `.vmt` file can also change two more things inside its `Proxies { PlayerSpeed { ... } }` block:
 
@@ -87,7 +92,19 @@ A material's own `.vmt` file can also change two more things inside its `Proxies
 
 If a material's `.vmt` declares `PlayerSpeed` more than once in the same `Proxies {}` block (for example, to try to get a raw number and a smoothed number into two separate variables at once), only the first declaration is used — the plugin reads the file itself (not the engine's parsed copy) and always finds the first `PlayerSpeed` block in the text, regardless of how many proxy instances the engine actually creates from it. This is a known limitation, not a supported feature.
 
-### 6. Unloading
+### 6. Showing what you're doing (NOCLIP / CLIMB label)
+
+Besides `PlayerSpeed`, the plugin also handles a second proxy name: `PlayerSpeedState`. If a material asks for this proxy, the plugin writes a small number into `$frame` (or whatever `resultVar` the material asks for, same idea as `PlayerSpeed`). This is meant for a texture that has a few pictures stacked in it (like a small icon saying "UPS", "CLIMB", or "NOCLIP"), and `$frame` just picks which picture shows.
+
+The number means:
+
+- `1` = normal (the default, also what you see if this plugin is not loaded at all)
+- `2` = climbing a real ladder
+- `3` = noclip is on
+
+That's it for now. There is also a `0` and a `4` reserved in the picture strip for later, but nothing currently sets them, so they are not used.
+
+### 7. Unloading
 
 If the plugin is unloaded normally (through `plugin_unload`, or the map/server shutting down cleanly), it puts the original material proxy factory back and cleans up its own objects, so the game returns to normal.
 

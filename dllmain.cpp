@@ -131,7 +131,7 @@ static bool ResolveVelocityOffsetImpl(IBaseClientDLL* pClientDLL)
 
 	if (!pClass)
 	{
-		LogLine("[2DSpeedProxy] GetAllClasses() returned NULL pointer");
+		//LogLine("[2DSpeedProxy] GetAllClasses() returned NULL pointer");
 		return false;
 	}
 
@@ -147,17 +147,17 @@ static bool ResolveVelocityOffsetImpl(IBaseClientDLL* pClientDLL)
 				if (offset >= 0 && offset <= 65536)
 				{
 					g_iVelocityOffset = offset;
-					LogLine("[2DSpeedProxy] Resolved m_vecVelocity offset = %d (client-side RecvTable)", offset);
+					//LogLine("[2DSpeedProxy] Resolved m_vecVelocity offset = %d (client-side RecvTable)", offset);
 					bGotVelocity = true;
 				}
 				else
 				{
-					LogLine("[2DSpeedProxy] Resolved m_vecVelocity to an implausible offset = %d -- rejecting it", offset);
+					//LogLine("[2DSpeedProxy] Resolved m_vecVelocity to an implausible offset = %d -- rejecting it", offset);
 				}
 			}
 			else
 			{
-				LogLine("[2DSpeedProxy] Found CTerrorPlayer but couldn't find m_vecVelocity in its RecvTable");
+				//LogLine("[2DSpeedProxy] Found CTerrorPlayer but couldn't find m_vecVelocity in its RecvTable");
 			}
 
 			// Observer mode/target - needed to detect noclip while spectating another player
@@ -165,22 +165,22 @@ static bool ResolveVelocityOffsetImpl(IBaseClientDLL* pClientDLL)
 			if (FindRecvPropOffset(pClass->m_pRecvTable, "m_iObserverMode", 0, obsOffset))
 			{
 				g_iObserverModeOffset = obsOffset;
-				LogLine("[2DSpeedProxy] Resolved m_iObserverMode offset = %d", obsOffset);
+				//LogLine("[2DSpeedProxy] Resolved m_iObserverMode offset = %d", obsOffset);
 			}
 			else
 			{
-				LogLine("[2DSpeedProxy] Could not find m_iObserverMode in RecvTable");
+				//LogLine("[2DSpeedProxy] Could not find m_iObserverMode in RecvTable");
 			}
 
 			int targetOffset = 0;
 			if (FindRecvPropOffset(pClass->m_pRecvTable, "m_hObserverTarget", 0, targetOffset))
 			{
 				g_iObserverTargetOffset = targetOffset;
-				LogLine("[2DSpeedProxy] Resolved m_hObserverTarget offset = %d", targetOffset);
+				//LogLine("[2DSpeedProxy] Resolved m_hObserverTarget offset = %d", targetOffset);
 			}
 			else
 			{
-				LogLine("[2DSpeedProxy] Could not find m_hObserverTarget in RecvTable");
+				//LogLine("[2DSpeedProxy] Could not find m_hObserverTarget in RecvTable");
 			}
 
 			return bGotVelocity;
@@ -193,12 +193,12 @@ static bool ResolveVelocityOffsetImpl(IBaseClientDLL* pClientDLL)
 	pClass = pClientDLL->GetAllClasses();
 	while (pClass)
 	{
-		LogLine("[2DSpeedProxy]   class[%d] = \"%s\"", iCount,
-			pClass->m_pNetworkName ? pClass->m_pNetworkName : "(null name)");
+		//LogLine("[2DSpeedProxy]   class[%d] = \"%s\"", iCount,
+		//	pClass->m_pNetworkName ? pClass->m_pNetworkName : "(null name)");
 		pClass = pClass->m_pNext;
 		iCount++;
 	}
-	LogLine("[2DSpeedProxy] Could not find CTerrorPlayer client class -- dumped %d classes above", iCount);
+	//LogLine("[2DSpeedProxy] Could not find CTerrorPlayer client class -- dumped %d classes above", iCount);
 	return false;
 }
 
@@ -211,7 +211,7 @@ static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
 {
 	if (!pClientDLL)
 	{
-		LogLine("[2DSpeedProxy] ResolveVelocityOffset called with NULL pClientDLL!");
+		//LogLine("[2DSpeedProxy] ResolveVelocityOffset called with NULL pClientDLL!");
 		return false;
 	}
 
@@ -221,24 +221,49 @@ static bool ResolveVelocityOffset(IBaseClientDLL* pClientDLL)
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{
-		LogLine("[2DSpeedProxy] SEH: access violation walking client classes/RecvTable "
-			"(GetAllClasses ABI mismatch on this build) - falling back to hardcoded offset");
+		//LogLine("[2DSpeedProxy] SEH: access violation walking client classes/RecvTable "
+		//	"(GetAllClasses ABI mismatch on this build) - falling back to hardcoded offset");
 		return false;
 	}
 }
 
-// === Velocity Calculation with Smoothing ===
-// Helper: detect if player is on a ladder (check if significant Z velocity with low XY velocity)
-static bool IsOnLadder(const Vector3D* pVel)
+// === Movement State Classification ===
+// Both the existing 2D-mode speed calc AND the label-state proxy read this -
+// single source of truth, no duplication.
+enum class EMovementState
 {
-	if (!pVel) return false;
-	float flHorizontal = std::sqrt(pVel->x * pVel->x + pVel->y * pVel->y);
-	float flVertical = std::abs(pVel->z);
+	Normal, // default - 2D/UPS, idle AND near-zero jumps included
+	Ladder, // MOVETYPE_LADDER
+};
 
-	// On ladder: EITHER very high vertical velocity (350+) with low horizontal (<50)
-	// OR standing still with any upward movement (horizontal <25 and vertical >10)
-	// This prevents normal jump/bhop from triggering 3D calculation
-	return (flVertical > 350.0f && flHorizontal < 50.0f) || (flVertical > 10.0f && flHorizontal < 25.0f);
+// MOVETYPE_LADDER = 9 (same m_MoveType field already used for WALK=2/NOCLIP=8
+// at 0x144). Real engine state instead of a velocity guess - no more stutter,
+// matches sw1ft's TAS Kit MOVETYPE_LADDER check.
+static bool IsPlayerOnLadderMoveType(C_BaseEntity* pEntity)
+{
+	if (!pEntity) return false;
+	try {
+		const char* pBase = reinterpret_cast<const char*>(pEntity);
+		int iMoveType = *reinterpret_cast<const int*>(pBase + 0x144);
+		return iMoveType == 9; // MOVETYPE_LADDER
+	}
+	catch (...) {
+		return false;
+	}
+}
+
+
+static EMovementState ClassifyMovementState(C_BaseEntity* pEntity)
+{
+	if (IsPlayerOnLadderMoveType(pEntity))
+		return EMovementState::Ladder;
+	return EMovementState::Normal;
+}
+
+// Only Ladder forces full 3D in the 2D speed calc below.
+static bool IsOnLadder(C_BaseEntity* pEntity)
+{
+	return IsPlayerOnLadderMoveType(pEntity);
 }
 
 // If spectating (observer mode != 0) with a valid target, returns the target entity.
@@ -339,7 +364,7 @@ static float ComputeSmoothedLocalPlayerSpeed2D(bool bForce3D = false)
 						// calling material explicitly opted into "mode 3d", in which
 						// case always report full 3D magnitude (still smoothed the
 						// same way $speed/$2dvel are).
-						bool bOnLadder = IsOnLadder(pVel);
+						bool bOnLadder = IsOnLadder(pEntity);
 						if (bForce3D || bOnLadder)
 							flRaw = pVel->Length3D();  // Full 3D velocity (forced, or on ladder)
 						else
@@ -456,6 +481,55 @@ static bool ExtractKeyValue(const char* pBlockStart, const char* pBlockEnd, cons
 	return iOut > 0;
 }
 
+// Locate a Proxies{} sub-block by exact key name (e.g. "PlayerSpeed") with
+// real word-boundary checks - so searching for "PlayerSpeed" can never match
+// inside "PlayerSpeedState" by accident (plain substring search would).
+static bool FindProxyBlock(const char* pText, const char* pTextEnd, const char* pszProxyName,
+	const char** ppBlockStart, const char** ppBlockEnd)
+{
+	size_t iNameLen = strlen(pszProxyName);
+	for (const char* p = pText; p + iNameLen <= pTextEnd; p++)
+	{
+		size_t i = 0;
+		for (; i < iNameLen; i++)
+		{
+			if (std::tolower((unsigned char)p[i]) != std::tolower((unsigned char)pszProxyName[i])) break;
+		}
+		if (i != iNameLen) continue;
+
+		// char before the match (if any) must not be alnum/underscore
+		if (p > pText && (std::isalnum((unsigned char)p[-1]) || p[-1] == '_'))
+			continue;
+		// char after the match must not be alnum/underscore either - this is
+		// the check that stops "PlayerSpeed" from matching "PlayerSpeedState"
+		const char* pAfter = p + iNameLen;
+		if (pAfter < pTextEnd && (std::isalnum((unsigned char)*pAfter) || *pAfter == '_'))
+			continue;
+
+		const char* pOpen = pAfter;
+		while (pOpen < pTextEnd && *pOpen != '{') pOpen++;
+		if (pOpen >= pTextEnd) continue;
+
+		int iDepth = 0;
+		const char* pClose = nullptr;
+		for (const char* q = pOpen; q < pTextEnd; q++)
+		{
+			if (*q == '{') iDepth++;
+			else if (*q == '}')
+			{
+				iDepth--;
+				if (iDepth == 0) { pClose = q; break; }
+			}
+		}
+		if (!pClose) continue;
+
+		*ppBlockStart = pOpen;
+		*ppBlockEnd = pClose + 1;
+		return true;
+	}
+	return false;
+}
+
 // Read materials/<pMaterial->GetName()>.vmt directly off disk, locate the
 // Proxies { PlayerSpeed { ... } } block, and pull out its real settings.
 // Uses a fixed local buffer (no std::string/new) - VMTs are a few KB at most.
@@ -470,7 +544,7 @@ static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConf
 	FileHandle_t hFile = g_pFileSystem->Open(szPath, "rt", "GAME");
 	if (!hFile)
 	{
-		LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: could not open \"%s\"", szPath);
+		//LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: could not open \"%s\"", szPath);
 		return false;
 	}
 
@@ -478,7 +552,7 @@ static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConf
 	unsigned int uSize = g_pFileSystem->Size(hFile);
 	if (uSize == 0 || uSize > kMaxVmtSize)
 	{
-		LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: \"%s\" bad size %u", szPath, uSize);
+		//LogLine("[2DSpeedProxy] ReadPlayerSpeedProxyConfig: \"%s\" bad size %u", szPath, uSize);
 		g_pFileSystem->Close(hFile);
 		return false;
 	}
@@ -492,31 +566,14 @@ static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConf
 	szText[iRead] = '\0';
 	const char* pTextEnd = szText + iRead;
 
-	// Locate "PlayerSpeed" then its enclosing { ... } block.
-	const char* pPS = FindCaseInsensitive(szText, "PlayerSpeed");
-	if (!pPS)
+	const char* pOpen = nullptr;
+	const char* pBlockEnd = nullptr;
+	if (!FindProxyBlock(szText, pTextEnd, "PlayerSpeed", &pOpen, &pBlockEnd))
 	{
-		LogLine("[2DSpeedProxy] \"%s\" has no PlayerSpeed proxy - skipping", szPath);
+		//LogLine("[2DSpeedProxy] \"%s\" has no PlayerSpeed proxy - skipping", szPath);
 		return false;
 	}
-
-	const char* pOpen = strchr(pPS, '{');
-	if (!pOpen || pOpen >= pTextEnd)
-		return false;
-
-	int iDepth = 0;
-	const char* pClose = nullptr;
-	for (const char* p = pOpen; p < pTextEnd; p++)
-	{
-		if (*p == '{') iDepth++;
-		else if (*p == '}')
-		{
-			iDepth--;
-			if (iDepth == 0) { pClose = p; break; }
-		}
-	}
-	if (!pClose)
-		return false;
+	const char* pClose = pBlockEnd - 1;
 
 	char szScale[32] = { 0 };
 	char szMode[32] = { 0 };
@@ -527,7 +584,7 @@ static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConf
 
 	if (!bHasResultVar)
 	{
-		LogLine("[2DSpeedProxy] \"%s\" PlayerSpeed block has no resultVar - skipping", szPath);
+		//LogLine("[2DSpeedProxy] \"%s\" PlayerSpeed block has no resultVar - skipping", szPath);
 		return false;
 	}
 
@@ -541,6 +598,58 @@ static bool ReadPlayerSpeedProxyConfig(const char* pszMaterialName, VmtProxyConf
 	LogLine("[2DSpeedProxy] \"%s\" -> resultVar=%s scale=%.2f mode=%s (read from vmt on disk)",
 		szPath, outCfg.szResultVar, outCfg.flScale, outCfg.bMode2D ? "2d" : "3d (default)");
 
+	return true;
+}
+
+// === PlayerSpeedState: drives $frame on the speedometer label texture ===
+// Frame layout baked into the atlas: 0=UPS (default/normal), 1=VEL
+// (near-zero-velocity launch), 2=LADDER (real ladder climb), 3=NOCLIP.
+// resultVar defaults to "$frame" - only reads the vmt at all to allow an
+// override, same philosophy as PlayerSpeed's resultVar.
+struct VmtStateProxyConfig
+{
+	char szResultVar[64] = "$frame";
+	bool bValid = false;
+};
+
+static bool ReadPlayerSpeedStateProxyConfig(const char* pszMaterialName, VmtStateProxyConfig& outCfg)
+{
+	if (!g_pFileSystem || !pszMaterialName || !*pszMaterialName)
+		return false;
+
+	char szPath[512];
+	_snprintf_s(szPath, sizeof(szPath), _TRUNCATE, "materials/%s.vmt", pszMaterialName);
+
+	FileHandle_t hFile = g_pFileSystem->Open(szPath, "rt", "GAME");
+	if (!hFile)
+		return false;
+
+	const unsigned int kMaxVmtSize = 16384;
+	unsigned int uSize = g_pFileSystem->Size(hFile);
+	if (uSize == 0 || uSize > kMaxVmtSize)
+	{
+		g_pFileSystem->Close(hFile);
+		return false;
+	}
+
+	char szText[kMaxVmtSize + 1];
+	int iRead = g_pFileSystem->Read(szText, (int)uSize, hFile);
+	g_pFileSystem->Close(hFile);
+	if (iRead <= 0)
+		return false;
+	szText[iRead] = '\0';
+	const char* pTextEnd = szText + iRead;
+
+	const char* pOpen = nullptr;
+	const char* pBlockEnd = nullptr;
+	if (!FindProxyBlock(szText, pTextEnd, "PlayerSpeedState", &pOpen, &pBlockEnd))
+		return false; // block not present -> keep default "$frame", not an error
+
+	char szVar[64];
+	if (ExtractKeyValue(pOpen, pBlockEnd, "resultVar", szVar, sizeof(szVar)))
+		strncpy_s(outCfg.szResultVar, szVar, _TRUNCATE);
+
+	outCfg.bValid = true;
 	return true;
 }
 
@@ -559,7 +668,7 @@ public:
 		(void)pKeyValues; // deliberately never touched - see comment above
 
 		const char* pszMatName = pMaterial ? pMaterial->GetName() : nullptr;
-		LogLine("[2DSpeedProxy] PlayerSpeed::Init material = \"%s\"", pszMatName ? pszMatName : "(null)");
+		//LogLine("[2DSpeedProxy] PlayerSpeed::Init material = \"%s\"", pszMatName ? pszMatName : "(null)");
 
 		if (!pMaterial)
 		{
@@ -571,8 +680,8 @@ public:
 		VmtProxyConfig cfg;
 		if (!ReadPlayerSpeedProxyConfig(pszMatName, cfg))
 		{
-			LogLine("[2DSpeedProxy] PlayerSpeed: could not read a valid config for \"%s\" from its vmt - skipping (not our material)",
-				pszMatName ? pszMatName : "(null)");
+			//LogLine("[2DSpeedProxy] PlayerSpeed: could not read a valid config for \"%s\" from its vmt - skipping (not our material)",
+			//	pszMatName ? pszMatName : "(null)");
 			m_flScale = 1.0f;
 			m_bForce3D = true;
 			return false;
@@ -582,8 +691,8 @@ public:
 		m_pSpeedVar = pMaterial->FindVar(cfg.szResultVar, &bFound);
 		if (!bFound || !m_pSpeedVar)
 		{
-			LogLine("[2DSpeedProxy] PlayerSpeed: vmt for \"%s\" names resultVar \"%s\" but FindVar failed - skipping",
-				pszMatName ? pszMatName : "(null)", cfg.szResultVar);
+			//LogLine("[2DSpeedProxy] PlayerSpeed: vmt for \"%s\" names resultVar \"%s\" but FindVar failed - skipping",
+			//	pszMatName ? pszMatName : "(null)", cfg.szResultVar);
 			m_flScale = 1.0f;
 			m_bForce3D = true;
 			return false;
@@ -592,8 +701,8 @@ public:
 		m_flScale = cfg.flScale;
 		m_bForce3D = !cfg.bMode2D; // no "mode" key, or anything other than "2d", = raw 3D
 
-		LogLine("[2DSpeedProxy] PlayerSpeed: material \"%s\" -> resultVar=%s scale=%.2f mode=%s (auto-detected from vmt on disk)",
-			pszMatName ? pszMatName : "(null)", cfg.szResultVar, m_flScale, m_bForce3D ? "3d" : "2d");
+		//LogLine("[2DSpeedProxy] PlayerSpeed: material \"%s\" -> resultVar=%s scale=%.2f mode=%s (auto-detected from vmt on disk)",
+		//	pszMatName ? pszMatName : "(null)", cfg.szResultVar, m_flScale, m_bForce3D ? "3d" : "2d");
 
 		return true;
 	}
@@ -619,9 +728,12 @@ public:
 		// in here so "mode" alone decides raw-vs-clean instead of needing a      //
 		// second proxy name. Still forces full 3D during noclip (bypassing      //
 		// hysteresis) since noclip speed changes are intentional/instant, not    //
-		// jitter to smooth out.                                                  //
+		// jitter to smooth out. Ladder gets the same bypass, for accuracy: the   //
+		// std::round() below would show 199.99 as 200, and climbing wants the    //
+		// exact value, not the rounded/hysteresis-smoothed one.                  //
 		///////////////////////////////////////////////////////////////////////////
 		bool bNoclip = false;
+		bool bOnLadder = false;
 		if (g_pEngine && g_pEntityList)
 		{
 			int iLocalPlayer = g_pEngine->GetLocalPlayer();
@@ -633,11 +745,12 @@ public:
 					C_BaseEntity* pEntity = pClientEnt->GetBaseEntity();
 					pEntity = ResolveEffectiveEntity(pEntity);
 					bNoclip = pEntity && IsInNoclip(pEntity);
+					bOnLadder = pEntity && IsOnLadder(pEntity);
 				}
 			}
 		}
 
-		if (bNoclip)
+		if (bNoclip || bOnLadder)
 		{
 			m_pSpeedVar->SetFloatValue(ComputeSmoothedLocalPlayerSpeed2D() * m_flScale);
 			return;
@@ -680,6 +793,108 @@ public:
 // Static member initialization
 float CSpeedProxy::flLastDisplayed = 0.0f;
 
+// === CSpeedStateProxy: drives $frame on the speedometer label atlas ===
+// Frame mapping (must match the order frames were baked into the .vtf):
+//   0 = VEL     - unused by this code 
+//   1 = UPS     - default/normal 2D-speed-tracking (also what shows if the
+//                 plugin isn't loaded, since $frame just stays at its
+//                 built-in default)
+//   2 = CLIMB   - genuinely climbing a ladder (real MOVETYPE_LADDER)
+//   3 = NOCLIP  - noclip active = Shows 3d Vel when it's active
+//   4 = BOOST   - unused, same as frame 0 (present in the .vtf, not wired up)
+//				   (boost detection was rolled back -
+//                 too unreliable on laggy clients), but still present in
+//                 the.vtf atlas, just never selected
+class CSpeedStateProxy : public IMaterialProxy
+{
+private:
+	IMaterialVar* m_pStateVar = nullptr;
+
+public:
+	bool Init(IMaterial* pMaterial, KeyValues* pKeyValues) override
+	{
+		(void)pKeyValues;
+
+		const char* pszMatName = pMaterial ? pMaterial->GetName() : nullptr;
+		//LogLine("[2DSpeedProxy] PlayerSpeedState::Init material = \"%s\"", pszMatName ? pszMatName : "(null)");
+
+		if (!pMaterial)
+			return false;
+
+		VmtStateProxyConfig cfg;
+		ReadPlayerSpeedStateProxyConfig(pszMatName, cfg); // ok if this returns false - szResultVar still defaults to "$frame"
+
+		bool bFound = false;
+		m_pStateVar = pMaterial->FindVar(cfg.szResultVar, &bFound);
+		if (!bFound || !m_pStateVar)
+		{
+			//LogLine("[2DSpeedProxy] PlayerSpeedState: material \"%s\" has no \"%s\" var - skipping",
+			//	pszMatName ? pszMatName : "(null)", cfg.szResultVar);
+			return false;
+		}
+
+		//LogLine("[2DSpeedProxy] PlayerSpeedState: material \"%s\" -> resultVar=%s (auto-detected from vmt on disk)",
+		//	pszMatName ? pszMatName : "(null)", cfg.szResultVar);
+
+		return true;
+	}
+
+	void OnBind(void* pRenderable) override
+	{
+		if (!m_pStateVar) return;
+
+		int iFrame = 1; // default: UPS
+
+		if (g_pEngine && g_pEntityList && g_iVelocityOffset >= 0)
+		{
+			try
+			{
+				int iLocalPlayer = g_pEngine->GetLocalPlayer();
+				if (iLocalPlayer > 0)
+				{
+					IClientEntity* pClientEnt = g_pEntityList->GetClientEntity(iLocalPlayer);
+					if (pClientEnt)
+					{
+						C_BaseEntity* pEntity = pClientEnt->GetBaseEntity();
+						pEntity = ResolveEffectiveEntity(pEntity);
+						if (pEntity)
+						{
+							if (IsInNoclip(pEntity))
+							{
+								iFrame = 3; // NOCLIP
+							}
+							else
+							{
+								switch (ClassifyMovementState(pEntity))
+								{
+								case EMovementState::Ladder: iFrame = 2; break; // CLIMB
+								default:                      iFrame = 1; break; // UPS
+								}
+							}
+						}
+					}
+				}
+			}
+			catch (...)
+			{
+				iFrame = 1; // UPS
+			}
+		}
+
+		m_pStateVar->SetIntValue(iFrame);
+	}
+
+	void Release() override
+	{
+		delete this;
+	}
+
+	IMaterial* GetMaterial() override
+	{
+		return nullptr;
+	}
+};
+
 // Proxy factory
 class CProxyFactory : public IMaterialProxyFactory
 {
@@ -688,7 +903,7 @@ public:
 	{
 		if (pOriginal == this)
 		{
-			LogLine("[2DSpeedProxy] WARNING: GetMaterialProxyFactory() returned ourselves -- not chaining");
+			//LogLine("[2DSpeedProxy] WARNING: GetMaterialProxyFactory() returned ourselves -- not chaining");
 			m_pOldFactory = nullptr;
 			return;
 		}
@@ -697,11 +912,16 @@ public:
 
 	IMaterialProxy* CreateProxy(const char* name) override
 	{
-		LogLine("[2DSpeedProxy] CreateProxy called: %s", name);
+		//LogLine("[2DSpeedProxy] CreateProxy called: %s", name);
 		if (name && strcmp(name, "PlayerSpeed") == 0)
 		{
 			LogLine("[2DSpeedProxy] Creating PlayerSpeed proxy");
 			return new CSpeedProxy();
+		}
+		if (name && strcmp(name, "PlayerSpeedState") == 0)
+		{
+			LogLine("[2DSpeedProxy] Creating PlayerSpeedState proxy");
+			return new CSpeedStateProxy();
 		}
 		// Pass through to old factory for other proxies
 		if (!m_pOldFactory)
@@ -709,7 +929,7 @@ public:
 
 		if (m_iRecursionDepth > 8)
 		{
-			LogLine("[2DSpeedProxy] WARNING: CreateProxy recursion depth exceeded for \"%s\"", name ? name : "(null)");
+			//LogLine("[2DSpeedProxy] WARNING: CreateProxy recursion depth exceeded for \"%s\"", name ? name : "(null)");
 			return nullptr;
 		}
 
@@ -928,7 +1148,7 @@ public:
 
 	void Pause() override {}
 	void UnPause() override {}
-	const char* GetPluginDescription() override { return "L4D2_2DVel [SpeedProxy] v1.0 by DXSamXD"; }
+	const char* GetPluginDescription() override { return "L4D2_2DVel [SpeedProxy] v1.1 by DXSamXD"; }
 	void LevelInit(char const* map) override {}
 	void ServerActivate(edict_t* edicts, int count, int max) override {}
 
